@@ -1,0 +1,48 @@
+name: Daily NSE Options Report
+
+on:
+  schedule:
+    # 16:00 UTC = 19:00 EAT, weekdays only
+    # (NSE Kenya publishes pricelist ~17:00-18:00 EAT, so this is safely after)
+    - cron: '0 16 * * 1-5'
+  workflow_dispatch:  # manual trigger for testing
+
+permissions:
+  contents: write  # required to push the report back to the repo
+
+jobs:
+  daily-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run engine
+        run: python engine.py
+
+      - name: Commit and push new reports
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add reports/
+          if git diff --staged --quiet; then
+            echo "No new reports to commit."
+          else
+            git commit -m "Daily report $(date -u +%Y-%m-%d)"
+            git push
+          fi
