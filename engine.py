@@ -5,7 +5,8 @@ For each target underlying:
   1. Validate our undiscounted Black-76 against NSE's flat-vol output.
   2. Recompute every strike with a quadratic smile.
   3. Log every strike where the smile price differs from NSE's flat price
-     by more than the configured threshold.
+     by more than the configured threshold, AND is isolated from its
+     neighbouring strikes (isolation filter).
 
 Runs as a batch job (typically 17:00 EAT).
 """
@@ -15,6 +16,7 @@ import logging
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
+from collections import defaultdict
 from typing import Dict, List
 
 from black76 import (
@@ -102,7 +104,7 @@ def _evaluate_strike(chain: OptionChain, row: StrikeRow,
     delta_put = black76_delta(F, K, T, sigma_K, "PUT", undiscounted=True)
     gamma = black76_gamma(F, K, T, sigma_K, undiscounted=True)
     vega_call = black76_vega_per_pct(F, K, T, sigma_K, undiscounted=True)
-    vega_put = vega_call  # by Black-76 symmetry
+    vega_put = vega_call
     theta_call = black76_theta_daily(F, K, T, sigma_K, "CALL", undiscounted=True)
     theta_put = black76_theta_daily(F, K, T, sigma_K, "PUT", undiscounted=True)
 
@@ -168,6 +170,58 @@ def run_eod(snapshot: PricelistSnapshot) -> List[StrikeReport]:
     return reports
 
 
+def apply_isolation_filter(reports: List[StrikeReport],
+                           factor: float = 2.0):
+    """
+    Remove flags whose anomaly is not isolated from neighbours.
+
+    For each flagged strike, compare |anomaly| to the average |anomaly|
+    of the two nearest strikes (by strike price, within the same
+    underlying). If the strike's anomaly is less than `factor` times
+    the neighbour average, unflag it — likely smile-model misfit
+    (clustered), not an isolated mispricing.
+
+    Modifies reports in place. Returns (call_flags_removed, put_flags_removed).
+    """
+    by_underlying: Dict[str, List[StrikeReport]] = defaultdict(list)
+    for r in reports:
+        by_underlying[r.underlying].append(r)
+
+    calls_removed = 0
+    puts_removed = 0
+
+    for _, rows in by_underlying.items():
+        rows.sort(key=lambda r: r.K)
+        n = len(rows)
+
+        for i, r in enumerate(rows):
+            if r.flagged_call:
+                neigh = []
+                if i > 0:
+                    neigh.append(abs(rows[i - 1].anomaly_call))
+                if i < n - 1:
+                    neigh.append(abs(rows[i + 1].anomaly_call))
+                if neigh:
+                    neigh_avg = sum(neigh) / len(neigh)
+                    if neigh_avg > 1e-6 and abs(r.anomaly_call) < factor * neigh_avg:
+                        r.flagged_call = False
+                        calls_removed += 1
+
+            if r.flagged_put:
+                neigh = []
+                if i > 0:
+                    neigh.append(abs(rows[i - 1].anomaly_put))
+                if i < n - 1:
+                    neigh.append(abs(rows[i + 1].anomaly_put))
+                if neigh:
+                    neigh_avg = sum(neigh) / len(neigh)
+                    if neigh_avg > 1e-6 and abs(r.anomaly_put) < factor * neigh_avg:
+                        r.flagged_put = False
+                        puts_removed += 1
+
+    return calls_removed, puts_removed
+
+
 def print_report(reports: List[StrikeReport],
                  snapshot: PricelistSnapshot) -> None:
     by_u: Dict[str, List[StrikeReport]] = {}
@@ -202,7 +256,6 @@ def print_report(reports: List[StrikeReport],
 def print_top_discrepancies(reports: List[StrikeReport],
                             top_n: int = 10) -> None:
     """Print the largest discrepancies by absolute KES and by percentage."""
-    # --- By absolute KES ---
     all_anomalies = []
     for r in reports:
         all_anomalies.append((abs(r.anomaly_call), r, "CALL", r.anomaly_call))
@@ -220,7 +273,6 @@ def print_top_discrepancies(reports: List[StrikeReport],
         print(f"  {i:<5} {r.underlying:<12} {r.K:>8.2f} {side:<5} "
               f"{nse_price:>10.4f} {smile_price:>12.4f} {delta:>+12.4f}")
 
-    # --- By relative % ---
     rel = []
     for r in reports:
         if r.nse_call > 0:
@@ -266,6 +318,11 @@ def main() -> None:
              len(snapshot.futures), len(snapshot.chains))
 
     reports = run_eod(snapshot)
+
+    calls_removed, puts_removed = apply_isolation_filter(reports)
+    print(f"\nIsolation filter removed {calls_removed} call flags "
+          f"and {puts_removed} put flags (clustered misfit).")
+
     print_report(reports, snapshot)
     print_top_discrepancies(reports, top_n=10)
 
