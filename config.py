@@ -44,20 +44,29 @@ FUTURES_DAY_COUNT = 364   # NSE's official futures day-count
 THETA_DAY_COUNT = 365     # Greeks convention: calendar-day theta
 
 # ---------------------------------------------------------------------------
+# # ---------------------------------------------------------------------------
 # Smile model — quadratic in log-moneyness
 #     sigma(K) = sigma_ATM * (1 + alpha * m + beta * m^2)
 #     m = ln(K / F)
 #
-# These are HYPOTHESIS parameters, not calibrated values.
-# Replace with fitted parameters once live NSE option trades accumulate.
+# alpha = -7.0 is derived from calibrating the smile on Nifty 50 options
+# (bhavcopy source, 18-74 day expiries, 2026-10-16). The median fitted
+# alpha across expiries was -7.6. Nifty is used as a documented proxy
+# because NSE Kenya publishes flat-vol indicative prices only, with no
+# observable smile to calibrate against.
+#
+# Uncertainty: alpha for the Kenyan smile is likely within +/-50% of this
+# value. See research/cross_market/ for the calibration methodology.
+#
+# beta is kept at 1.0 (fixed convexity prior). Quadratically fitting beta
+# on narrow moneyness bands is numerically unstable; empirical beta is
+# not reliably recoverable without deeper market structure.
 # ---------------------------------------------------------------------------
 SMILE_PARAMS: Dict[str, Dict[str, float]] = {
     "default": {
-        "alpha": -0.50,   # put skew: OTM puts (m < 0) carry higher IV
-        "beta": 1.00,     # convexity: both wings lift at deep strikes
+        "alpha": -7.00,
+        "beta": 1.00,
     },
-    # Per-name overrides (empty until Phase 2 calibration):
-    # "SCOM": {"alpha": -0.55, "beta": 1.10},
 }
 
 def get_smile_params(underlying: str) -> Dict[str, float]:
